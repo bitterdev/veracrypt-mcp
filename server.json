@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.bitterdev/veracrypt-mcp",
+  "description": "MCP server to mount and unmount VeraCrypt containers with secure stdin password handling.",
+  "repository": {
+    "url": "https://github.com/bitterdev/veracrypt-mcp",
+    "source": "github"
+  },
+  "version": "0.2.0",
+  "packages": [
+    {
+      "registryType": "pypi",
+      "identifier": "veracrypt-mcp",
+      "version": "0.2.0",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

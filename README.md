@@ -4,6 +4,8 @@ MCP (Model Context Protocol) server for mounting and unmounting [VeraCrypt](http
 
 Once a container is mounted, your MCP client (e.g. Claude Code) can read and edit the files inside it with its normal file tools. Say "mount my vault", work on the files, then "unmount my vault".
 
+mcp-name: io.github.bitterdev/veracrypt-mcp
+
 ## Features
 
 - **mount_container**: mount a VeraCrypt container (optional mount point, PIM, read-only)
