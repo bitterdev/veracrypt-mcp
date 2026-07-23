@@ -2,7 +2,7 @@
 
 [project]
 name = "veracrypt-mcp"
-version = "0.1.0"
+version = "0.2.0"
 description = "MCP server for mounting and unmounting VeraCrypt containers with secure password handling"
 readme = "README.md"
 requires-python = ">=3.10"

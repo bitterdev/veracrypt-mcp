@@ -2,11 +2,14 @@
 
 MCP (Model Context Protocol) server for mounting and unmounting [VeraCrypt](https://veracrypt.io) containers, with a security-first approach to password handling.
 
+Once a container is mounted, your MCP client (e.g. Claude Code) can read and edit the files inside it with its normal file tools. Say "mount my vault", work on the files, then "unmount my vault".
+
 ## Features
 
 - **mount_container**: mount a VeraCrypt container (optional mount point, PIM, read-only)
 - **unmount_container**: dismount by container path or mount point
 - **list_mounted_containers**: show all mounted VeraCrypt volumes
+- **Default vault**: configure your container once via environment variables; "mount my vault" then works without any arguments
 
 ## Security model
 
@@ -71,13 +74,26 @@ pip install .
 claude mcp add veracrypt -- veracrypt-mcp
 ```
 
+With a default vault (recommended):
+
+```bash
+claude mcp add veracrypt \
+  -e VERACRYPT_MCP_CONTAINER="/path/to/vault.hc" \
+  -e VERACRYPT_MCP_KEYCHAIN_ACCOUNT="my-vault" \
+  -- veracrypt-mcp
+```
+
 ### Claude Desktop / generic MCP client
 
 ```json
 {
   "mcpServers": {
     "veracrypt": {
-      "command": "veracrypt-mcp"
+      "command": "veracrypt-mcp",
+      "env": {
+        "VERACRYPT_MCP_CONTAINER": "/path/to/vault.hc",
+        "VERACRYPT_MCP_KEYCHAIN_ACCOUNT": "my-vault"
+      }
     }
   }
 }
@@ -87,7 +103,13 @@ The server runs over stdio.
 
 ## Usage examples
 
-Mount with keyring password (recommended):
+With a configured default vault:
+
+> Mount my vault
+
+> Unmount my vault
+
+Explicit, without defaults:
 
 > Mount the container /Users/me/secret.hc using the keychain account "my-container"
 
@@ -95,14 +117,13 @@ Mount read-only at a specific mount point:
 
 > Mount /Users/me/secret.hc read-only at ~/mnt/secret, keychain account "my-container"
 
-Unmount:
-
-> Unmount /Users/me/secret.hc
-
 ## Environment variables
 
 | Variable | Description |
 | --- | --- |
+| `VERACRYPT_MCP_CONTAINER` | Default container path used when no `container_path` is given |
+| `VERACRYPT_MCP_KEYCHAIN_ACCOUNT` | Default keyring account used when no password source is given |
+| `VERACRYPT_MCP_MOUNT_POINT` | Default mount directory (otherwise VeraCrypt auto-selects) |
 | `VERACRYPT_PATH` | Absolute path to the VeraCrypt binary if it is not on PATH |
 
 ## License

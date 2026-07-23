@@ -24,7 +24,16 @@ from mcp.server.fastmcp import FastMCP
 KEYCHAIN_SERVICE = "veracrypt-mcp"
 SUBPROCESS_TIMEOUT = 180
 
+# Optional defaults so a user can say "mount my vault" without arguments.
+ENV_DEFAULT_CONTAINER = "VERACRYPT_MCP_CONTAINER"
+ENV_DEFAULT_KEYCHAIN_ACCOUNT = "VERACRYPT_MCP_KEYCHAIN_ACCOUNT"
+ENV_DEFAULT_MOUNT_POINT = "VERACRYPT_MCP_MOUNT_POINT"
+
 mcp = FastMCP("veracrypt")
+
+
+def _default_container(container_path: str | None) -> str | None:
+    return container_path or os.environ.get(ENV_DEFAULT_CONTAINER)
 
 
 def _find_veracrypt() -> str:
@@ -79,13 +88,15 @@ def _keyring_password(account: str) -> str:
 
 
 def _resolve_password(password: str | None, keychain_account: str | None) -> str:
-    if keychain_account:
-        return _keyring_password(keychain_account)
+    account = keychain_account or os.environ.get(ENV_DEFAULT_KEYCHAIN_ACCOUNT)
+    if account:
+        return _keyring_password(account)
     if password:
         return password
     raise RuntimeError(
-        "No password source given. Provide 'keychain_account' (recommended) "
-        "or 'password'."
+        "No password source given. Provide 'keychain_account' (recommended), "
+        "'password', or set the VERACRYPT_MCP_KEYCHAIN_ACCOUNT environment "
+        "variable."
     )
 
 
@@ -108,7 +119,7 @@ def _error_text(result: subprocess.CompletedProcess[str]) -> str:
 
 @mcp.tool()
 def mount_container(
-    container_path: str,
+    container_path: str | None = None,
     mount_point: str | None = None,
     keychain_account: str | None = None,
     password: str | None = None,
@@ -124,16 +135,30 @@ def mount_container(
       via stdin (never visible in the process list), but it does pass through
       the LLM context. Prefer keychain_account.
 
+    All arguments may be omitted when the server is configured with default
+    environment variables (VERACRYPT_MCP_CONTAINER,
+    VERACRYPT_MCP_KEYCHAIN_ACCOUNT, VERACRYPT_MCP_MOUNT_POINT), so "mount my
+    vault" works without any parameters.
+
     Args:
         container_path: Absolute path to the VeraCrypt container file.
-        mount_point: Optional mount directory. If omitted, VeraCrypt picks one
+            Defaults to VERACRYPT_MCP_CONTAINER.
+        mount_point: Optional mount directory. If omitted, falls back to
+            VERACRYPT_MCP_MOUNT_POINT, otherwise VeraCrypt picks one
             automatically (e.g. /Volumes/... on macOS).
         keychain_account: Keyring account name to look up the password.
+            Defaults to VERACRYPT_MCP_KEYCHAIN_ACCOUNT.
         password: Plain text password (fallback, see above).
         pim: Optional PIM (Personal Iterations Multiplier) of the volume.
         read_only: Mount the volume read-only.
     """
-    container = Path(container_path).expanduser()
+    resolved_container = _default_container(container_path)
+    if not resolved_container:
+        return (
+            "Error: no container given. Provide 'container_path' or set the "
+            f"{ENV_DEFAULT_CONTAINER} environment variable."
+        )
+    container = Path(resolved_container).expanduser()
     if not container.exists():
         return f"Error: container not found: {container}"
 
@@ -146,8 +171,9 @@ def mount_container(
     if read_only:
         args += ["--mount-options", "readonly"]
     args.append(str(container))
-    if mount_point:
-        mount_dir = Path(mount_point).expanduser()
+    resolved_mount_point = mount_point or os.environ.get(ENV_DEFAULT_MOUNT_POINT)
+    if resolved_mount_point:
+        mount_dir = Path(resolved_mount_point).expanduser()
         mount_dir.mkdir(parents=True, exist_ok=True)
         args.append(str(mount_dir))
 
@@ -162,19 +188,25 @@ def mount_container(
         return f"Error mounting container: {_error_text(result)}"
 
     actual_mount = _find_mount_point(str(container))
-    location = actual_mount or str(mount_point or "auto-selected by VeraCrypt")
+    location = actual_mount or str(resolved_mount_point or "auto-selected by VeraCrypt")
     return f"Mounted {container} at {location}"
 
 
 @mcp.tool()
-def unmount_container(container_or_mount_point: str) -> str:
+def unmount_container(container_or_mount_point: str | None = None) -> str:
     """Unmount (dismount) a VeraCrypt container.
 
     Args:
         container_or_mount_point: Path to the container file OR its current
-            mount directory.
+            mount directory. Defaults to VERACRYPT_MCP_CONTAINER.
     """
-    target = str(Path(container_or_mount_point).expanduser())
+    resolved = _default_container(container_or_mount_point)
+    if not resolved:
+        return (
+            "Error: no target given. Provide 'container_or_mount_point' or "
+            f"set the {ENV_DEFAULT_CONTAINER} environment variable."
+        )
+    target = str(Path(resolved).expanduser())
     try:
         result = _run_veracrypt(["--dismount", target])
     except subprocess.TimeoutExpired:
