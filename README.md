@@ -8,7 +8,7 @@ mcp-name: io.github.bitterdev/veracrypt-mcp
 
 ## Features
 
-- **mount_container**: mount a VeraCrypt container (optional mount point, PIM, read-only)
+- **mount_container**: mount a VeraCrypt container (optional mount point, PIM, read-only, keyfiles)
 - **unmount_container**: dismount by container path or mount point
 - **list_mounted_containers**: show all mounted VeraCrypt volumes
 - **Default vault**: configure your container once via environment variables; "mount my vault" then works without any arguments
@@ -41,6 +41,12 @@ Then mount with `keychain_account: "my-container"`.
 ### 2. Direct password (fallback)
 
 You can pass `password` directly to the tool. It is still piped via stdin to VeraCrypt (never visible in the process list), **but it passes through the LLM conversation** and may be stored in chat logs. Use the keyring source whenever possible.
+
+### 3. Keyfiles and hardware tokens
+
+`keyfiles` (or `VERACRYPT_MCP_KEYFILES`, comma separated) maps to VeraCrypt `-k` and works with an empty password. If a keyfile is missing, the tool answers `Key nicht freigegeben` instead of trying other credentials. With default keyfiles configured and a keychain account set, a missing keyfile falls back to the keychain password once (useful while a volume still has its old password); if VeraCrypt rejects it, the answer is again `Key nicht freigegeben`.
+
+For keyfiles that only exist after the user unlocks a hardware token (YubiKey plus PIN), set `VERACRYPT_MCP_UNLOCK_COMMAND`. When no credential is passed, the tool runs that command with `--interaktiv`; the command asks the user, mounts the volume and exits non-zero if the key was not released. Nothing is cached, so every mount needs the user's input.
 
 Additional notes:
 
@@ -126,7 +132,17 @@ Mount read-only at a specific mount point:
 | `VERACRYPT_MCP_CONTAINER` | Default container path used when no `container_path` is given |
 | `VERACRYPT_MCP_KEYCHAIN_ACCOUNT` | Default keyring account used when no password source is given |
 | `VERACRYPT_MCP_MOUNT_POINT` | Default mount directory (otherwise VeraCrypt auto-selects) |
+| `VERACRYPT_MCP_KEYFILES` | Default keyfile paths, comma or newline separated |
+| `VERACRYPT_MCP_UNLOCK_COMMAND` | Interactive unlock command, called with `--interaktiv` |
 | `VERACRYPT_PATH` | Absolute path to the VeraCrypt binary if it is not on PATH |
+
+## Tests
+
+```bash
+python -m unittest discover -s tests
+```
+
+The tests create throwaway containers and need the VeraCrypt CLI.
 
 ## License
 

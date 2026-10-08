@@ -10,6 +10,10 @@ Security model:
   Linux via ``secret-tool``). With the keyring, the password never enters the
   LLM context or any conversation log.
 - Passwords are never logged and never included in tool results or errors.
+- Keyfiles (VeraCrypt ``-k``) are supported for volumes protected by a keyfile
+  plus an empty password, e.g. a keyfile that is only briefly decrypted onto a
+  RAM disk by a hardware token. A configured keyfile that is missing is
+  reported as "Key nicht freigegeben" instead of guessing other credentials.
 """
 
 import os
@@ -28,6 +32,12 @@ SUBPROCESS_TIMEOUT = 180
 ENV_DEFAULT_CONTAINER = "VERACRYPT_MCP_CONTAINER"
 ENV_DEFAULT_KEYCHAIN_ACCOUNT = "VERACRYPT_MCP_KEYCHAIN_ACCOUNT"
 ENV_DEFAULT_MOUNT_POINT = "VERACRYPT_MCP_MOUNT_POINT"
+ENV_DEFAULT_KEYFILES = "VERACRYPT_MCP_KEYFILES"
+ENV_UNLOCK_COMMAND = "VERACRYPT_MCP_UNLOCK_COMMAND"
+UNLOCK_TIMEOUT = 420
+
+KEY_NOT_RELEASED = "Key nicht freigegeben"
+WRONG_CREDENTIALS_MARKER = "Incorrect password"
 
 mcp = FastMCP("veracrypt")
 
@@ -87,6 +97,10 @@ def _keyring_password(account: str) -> str:
     return result.stdout.rstrip("\n")
 
 
+def _has_password_source(password: str | None, keychain_account: str | None) -> bool:
+    return bool(password or keychain_account or os.environ.get(ENV_DEFAULT_KEYCHAIN_ACCOUNT))
+
+
 def _resolve_password(password: str | None, keychain_account: str | None) -> str:
     account = keychain_account or os.environ.get(ENV_DEFAULT_KEYCHAIN_ACCOUNT)
     if account:
@@ -98,6 +112,29 @@ def _resolve_password(password: str | None, keychain_account: str | None) -> str
         "'password', or set the VERACRYPT_MCP_KEYCHAIN_ACCOUNT environment "
         "variable."
     )
+
+
+class KeyNotReleasedError(RuntimeError):
+    """A keyfile was requested but is not present (token not unlocked)."""
+
+
+def _split_keyfiles(raw: str) -> list[str]:
+    # os.pathsep (":") cannot separate paths that may contain colons on macOS
+    # volume names, so a newline or comma separated list is used instead.
+    parts = raw.replace(",", "\n").splitlines()
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _resolve_keyfiles(keyfiles: list[str] | None) -> tuple[list[str], bool]:
+    """Return (keyfile paths, explicitly requested by the caller)."""
+    if keyfiles:
+        return [str(Path(k).expanduser()) for k in keyfiles], True
+    raw = os.environ.get(ENV_DEFAULT_KEYFILES, "")
+    return [str(Path(k).expanduser()) for k in _split_keyfiles(raw)], False
+
+
+def _missing_keyfiles(paths: list[str]) -> list[str]:
+    return [p for p in paths if not Path(p).is_file()]
 
 
 def _run_veracrypt(
@@ -123,22 +160,36 @@ def mount_container(
     mount_point: str | None = None,
     keychain_account: str | None = None,
     password: str | None = None,
+    keyfiles: list[str] | None = None,
     pim: int | None = None,
     read_only: bool = False,
 ) -> str:
     """Mount a VeraCrypt container.
 
-    Password sources (exactly one is required):
-    - keychain_account (RECOMMENDED): name of an OS keyring entry with service
-      'veracrypt-mcp'. The password never enters the conversation.
+    Credential sources:
+    - keyfiles: paths of keyfiles (VeraCrypt -k). Used together with an empty
+      password unless a password source is given as well. If a keyfile does
+      not exist (e.g. the hardware token has not released it yet), the tool
+      answers "Key nicht freigegeben" and does not try anything else.
+    - keychain_account (RECOMMENDED for password volumes): name of an OS
+      keyring entry with service 'veracrypt-mcp'. The password never enters
+      the conversation.
     - password: the volume password in plain text. It is piped to VeraCrypt
       via stdin (never visible in the process list), but it does pass through
       the LLM context. Prefer keychain_account.
 
-    All arguments may be omitted when the server is configured with default
-    environment variables (VERACRYPT_MCP_CONTAINER,
-    VERACRYPT_MCP_KEYCHAIN_ACCOUNT, VERACRYPT_MCP_MOUNT_POINT), so "mount my
-    vault" works without any parameters.
+    If VERACRYPT_MCP_UNLOCK_COMMAND is set and no credential is passed, the
+    mount is handed to that command (called with --interaktiv), which asks
+    the user for the hardware token and PIN. Nothing is cached: every mount
+    through this tool needs the user's input.
+
+    Defaults from the environment: VERACRYPT_MCP_CONTAINER,
+    VERACRYPT_MCP_KEYCHAIN_ACCOUNT, VERACRYPT_MCP_MOUNT_POINT and
+    VERACRYPT_MCP_KEYFILES (comma or newline separated). With default
+    keyfiles configured, a present keyfile is used; a missing one falls back
+    to the keychain password (transition period while a volume still has its
+    old password), and if that is rejected the answer is
+    "Key nicht freigegeben".
 
     Args:
         container_path: Absolute path to the VeraCrypt container file.
@@ -149,6 +200,7 @@ def mount_container(
         keychain_account: Keyring account name to look up the password.
             Defaults to VERACRYPT_MCP_KEYCHAIN_ACCOUNT.
         password: Plain text password (fallback, see above).
+        keyfiles: Keyfile paths. Defaults to VERACRYPT_MCP_KEYFILES.
         pim: Optional PIM (Personal Iterations Multiplier) of the volume.
         read_only: Mount the volume read-only.
     """
@@ -162,16 +214,34 @@ def mount_container(
     if not container.exists():
         return f"Error: container not found: {container}"
 
+    resolved_mount_point = mount_point or os.environ.get(ENV_DEFAULT_MOUNT_POINT)
+    unlock_command = os.environ.get(ENV_UNLOCK_COMMAND)
+    if unlock_command and not keyfiles and not password and not keychain_account:
+        return _mount_via_unlock_command(unlock_command, container, resolved_mount_point)
+
+    keyfile_paths, explicit_keyfiles = _resolve_keyfiles(keyfiles)
+    missing = _missing_keyfiles(keyfile_paths)
+    use_keyfiles = bool(keyfile_paths) and not missing
+    fell_back = False
+
+    if missing and (explicit_keyfiles or not _has_password_source(password, keychain_account)):
+        return f"Error: {KEY_NOT_RELEASED} (keyfile not present: {', '.join(missing)})"
+
     try:
-        volume_password = _resolve_password(password, keychain_account)
+        if use_keyfiles and not password and not keychain_account:
+            volume_password = ""
+        else:
+            volume_password = _resolve_password(password, keychain_account)
+            fell_back = bool(missing)
     except RuntimeError as exc:
         return f"Error: {exc}"
 
     args = ["--stdin", "--pim", str(pim if pim is not None else 0)]
+    if use_keyfiles:
+        args += ["--keyfiles", ",".join(keyfile_paths), "--protect-hidden=no"]
     if read_only:
         args += ["--mount-options", "readonly"]
     args.append(str(container))
-    resolved_mount_point = mount_point or os.environ.get(ENV_DEFAULT_MOUNT_POINT)
     if resolved_mount_point:
         mount_dir = Path(resolved_mount_point).expanduser()
         mount_dir.mkdir(parents=True, exist_ok=True)
@@ -185,11 +255,37 @@ def mount_container(
         del volume_password
 
     if result.returncode != 0:
-        return f"Error mounting container: {_error_text(result)}"
+        error = _error_text(result)
+        if (use_keyfiles or fell_back) and WRONG_CREDENTIALS_MARKER in error:
+            return f"Error: {KEY_NOT_RELEASED} (VeraCrypt rejected the credentials)"
+        return f"Error mounting container: {error}"
 
     actual_mount = _find_mount_point(str(container))
     location = actual_mount or str(resolved_mount_point or "auto-selected by VeraCrypt")
     return f"Mounted {container} at {location}"
+
+
+def _mount_via_unlock_command(
+    command: str, container: Path, mount_point: str | None
+) -> str:
+    """Delegate mounting to an interactive unlock command (e.g. hardware token + PIN).
+
+    The command receives --interaktiv and is expected to ask the user, mount the
+    volume and exit non-zero if the user did not release the key.
+    """
+    cmd = [*shlex.split(command), "--interaktiv"]
+    try:
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, timeout=UNLOCK_TIMEOUT
+        )
+    except subprocess.TimeoutExpired:
+        return f"Error: {KEY_NOT_RELEASED} (no answer within {UNLOCK_TIMEOUT} s)"
+    except OSError as exc:
+        return f"Error: unlock command failed to start: {exc}"
+    actual_mount = _find_mount_point(str(container))
+    if result.returncode != 0 or not actual_mount:
+        return f"Error: {KEY_NOT_RELEASED}"
+    return f"Mounted {container} at {actual_mount}"
 
 
 @mcp.tool()
